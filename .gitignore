@@ -1,0 +1,19 @@
+# Object files
+obj/
+*.o
+
+# Shared objects (inc. Windows DLLs)
+*.so
+
+# Executables
+test
+
+# Development
+cscope.*
+.vscode
+*.swp
+tags
+
+# Doxygen
+latex
+html
