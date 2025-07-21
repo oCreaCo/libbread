@@ -19,6 +19,7 @@ void C();
 void D();
 void E(int cnt);
 void F(int cnt);
+void G(int cnt);
 
 void func(tmp * t)
 {
@@ -30,6 +31,21 @@ void func(tmp * t)
         fprintf(stderr, "even, b: %d\n", t->b);
     else
         fprintf(stderr, "odd, b: %d\n", t->b);
+
+#ifdef BREAD
+    bread_end();
+#endif /* BREAD */
+}
+
+void G(int cnt)
+{
+#ifdef BREAD
+    bread_start();
+#endif /* BREAD */
+
+    fprintf(stderr, "G, cnt: %d\n", cnt--);
+    if (cnt > 0)
+        G(cnt);
 
 #ifdef BREAD
     bread_end();
@@ -155,6 +171,7 @@ int main(int argc, char *argv[])
     A();
     B();
     E(5);
+    G(10);
 
     fd = open("./testfile.txt", O_RDWR);
     pread(fd, buffer, 32, 0);

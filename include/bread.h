@@ -36,7 +36,10 @@ typedef struct BreadStatNodeData
 	int hash_next; // node_idx
 	int stack_depth;
 	int num_children;
+	int recursion_cnt;
 	int children[MAX_NUM_CHILD]; // node_idx
+	uint64_t gene_prev;
+	uint64_t gene;
 	uint64_t func_fingerprint;
 	char func_name[256];
 

@@ -12,6 +12,8 @@
 #endif
 
 thread_local int flag = 0;
+thread_local uint64_t gene_prev;
+thread_local uint64_t gene;
 
 thread_local int tid = -1;
 thread_local int t_type;
@@ -21,6 +23,7 @@ thread_local int num_nodes = 0;
 thread_local BreadStatNodeData bread_nodes[MAX_NUM_NODES];
 
 thread_local int stack[MAX_NUM_NODES]; // node_idx
+thread_local int most_recent_node_idx;
 thread_local int stack_depth;
 thread_local int print_depth;
 
@@ -174,11 +177,15 @@ int bread_init_internal(int is_main, uint64_t token)
 
     if (unlikely(tid == -1))
         tid = gettid();
+
+    gene_prev = -1;
+    gene = 0;
     
     t_type = is_main;
     t_token = token;
 
     num_nodes = 0;
+    most_recent_node_idx = -1;
     stack_depth = -1;
 
 #ifdef BREAD_MEM
@@ -195,6 +202,7 @@ int bread_init_internal(int is_main, uint64_t token)
         bread_nodes[i].hash_next = -1;
         bread_nodes[i].stack_depth = -1;
         bread_nodes[i].num_children = 0;
+        bread_nodes[i].recursion_cnt = 0;
 
         bread_nodes[i].call_cnt = 0;
 
@@ -229,18 +237,38 @@ int bread_start_internal(const char *func)
     if (unlikely(flag == 0))
         return 1;
 
-    if (unlikely(stack_depth == MAX_NUM_NODES - 1)) {
-        fprintf(stderr, "bread_start failed: max call depth\n");
-        return 1;
+    if (likely(stack_depth != -1)) {
+        if (unlikely(stack_depth == MAX_NUM_NODES - 1)) {
+            fprintf(stderr, "bread_start failed: max call depth\n");
+            return 1;
+        }
+
+        func_fingerprint = (uint64_t)(func) << stack_depth;
+
+        /* Recursion */
+        if ((gene_prev ^ func_fingerprint) == gene)
+        {
+            curr = bread_nodes + most_recent_node_idx;
+            ++(curr->recursion_cnt);
+            ++(curr->call_cnt);
+            return 0;
+        }
+
+        func_fingerprint <<= 1;
+        ++stack_depth;
+    } else {
+        func_fingerprint = (uint64_t)(func) << (++stack_depth);
     }
 
-    func_fingerprint = (uint64_t)(__builtin_return_address(0)) + (++stack_depth);
-
-    node_idx = bread_hashtable_lookup(func_fingerprint, stack_depth);
+    gene_prev = gene;
+    gene ^= func_fingerprint;
+    node_idx = bread_hashtable_lookup(gene);
 
     if (unlikely(node_idx == -1)) {
-        if (unlikely(num_nodes == MAX_NUM_NODES - 1)) {
+        if (unlikely(num_nodes == MAX_NUM_NODES)) {
             fprintf(stderr, "bread_start failed: max bread nodes\n");
+            for (int i = 0; i < MAX_NUM_NODES; i++)
+                fprintf(stderr, "depth: %d, %s\n", bread_nodes[i].stack_depth, bread_nodes[i].func_name);
             return 1;
         }
 
@@ -248,27 +276,33 @@ int bread_start_internal(const char *func)
 
         curr = bread_nodes + node_idx;
         curr->stack_depth = stack_depth;
+        curr->gene_prev = gene_prev;
+        curr->gene = gene;
         curr->func_fingerprint = func_fingerprint;
         sprintf(curr->func_name, func);
 
         if (likely(stack_depth != 0)) {
             BreadStatNode parent = bread_nodes + stack[stack_depth - 1];
 
-            if (unlikely(parent->num_children == MAX_NUM_CHILD - 1)) {
+            if (unlikely(parent->num_children == MAX_NUM_CHILD)) {
                 fprintf(stderr, "bread_start failed: max child nodes\n");
+                for (int i = 0; i < MAX_NUM_CHILD; i++)
+                    fprintf(stderr, "func: %s\n", bread_nodes[parent->children[i]].func_name);
                 return 1;
             }
 
             parent->children[parent->num_children++] = node_idx;
         }
 
-        bread_hashtable_insert(func_fingerprint, node_idx);
+        bread_hashtable_insert(gene, node_idx);
     } else {
         curr = bread_nodes + node_idx;
     }
 
+    ++(curr->recursion_cnt);
     ++(curr->call_cnt);
     stack[stack_depth] = node_idx;
+    most_recent_node_idx = node_idx;
 
     clock_gettime(CLOCK_MONOTONIC, &(curr->start_ts));
 
@@ -282,13 +316,24 @@ int bread_end()
     if (unlikely(flag == 0))
         return 1;
 
-    curr = bread_nodes + stack[stack_depth--];
+    curr = bread_nodes + most_recent_node_idx;
+    
+    /* During recursion */
+    if (--(curr->recursion_cnt) > 0)
+        return 0;
 
     clock_gettime(CLOCK_MONOTONIC, &(curr->end_ts));
 
     curr->latency +=
         ((curr->end_ts.tv_sec * G + curr->end_ts.tv_nsec) -
          (curr->start_ts.tv_sec * G + curr->start_ts.tv_nsec));
+
+    /* parent */
+    most_recent_node_idx = stack[--stack_depth];
+    curr = bread_nodes + most_recent_node_idx;
+
+    gene_prev = curr->gene_prev;
+    gene = curr->gene;
 
     return 0;
 }
@@ -297,7 +342,6 @@ static void bread_print_node(BreadStatNode curr)
 {
     uint64_t tmp1, tmp2;
 
-    print_len += sprintf(print_buffer + print_len, "");
     for (int i = 0; i < print_depth; i++)
         print_len += sprintf(print_buffer + print_len, "    ");
 
@@ -306,7 +350,6 @@ static void bread_print_node(BreadStatNode curr)
 
     /* latency */
     {
-        print_len += sprintf(print_buffer + print_len, "");
         for (int i = 0; i < print_depth; i++)
             print_len += sprintf(print_buffer + print_len, "    ");
         print_len += sprintf(print_buffer + print_len, "<latency: ");
@@ -334,7 +377,6 @@ static void bread_print_node(BreadStatNode curr)
 #ifdef BREAD_IO
     /* io_read_latency */
     {
-        print_len += sprintf(print_buffer + print_len, "");
         for (int i = 0; i < print_depth; i++)
             print_len += sprintf(print_buffer + print_len, "    ");
         print_len += sprintf(print_buffer + print_len, " ├─ io_read_latency: ");
@@ -360,7 +402,6 @@ static void bread_print_node(BreadStatNode curr)
 
     /* io_write_latency */
     {
-        print_len += sprintf(print_buffer + print_len, "");
         for (int i = 0; i < print_depth; i++)
             print_len += sprintf(print_buffer + print_len, "    ");
         print_len += sprintf(print_buffer + print_len, " ├─ io_write_latency: ");
@@ -388,7 +429,6 @@ static void bread_print_node(BreadStatNode curr)
 #ifdef BREAD_MEM
     /* mem_alloced */
     {
-        print_len += sprintf(print_buffer + print_len, "");
         for (int i = 0; i < print_depth; i++)
             print_len += sprintf(print_buffer + print_len, "    ");
         print_len += sprintf(print_buffer + print_len, " ├─ mem_alloced: ");
@@ -414,7 +454,6 @@ static void bread_print_node(BreadStatNode curr)
 
     /* mem_freed */
     {
-        print_len += sprintf(print_buffer + print_len, "");
         for (int i = 0; i < print_depth; i++)
             print_len += sprintf(print_buffer + print_len, "    ");
         print_len += sprintf(print_buffer + print_len, " ├─ mem_freed: ");
@@ -442,7 +481,6 @@ static void bread_print_node(BreadStatNode curr)
 #ifdef BREAD_IO
     /* data_read */
     {
-        print_len += sprintf(print_buffer + print_len, "");
         for (int i = 0; i < print_depth; i++)
             print_len += sprintf(print_buffer + print_len, "    ");
         print_len += sprintf(print_buffer + print_len, " ├─ data_read: ");
@@ -468,7 +506,6 @@ static void bread_print_node(BreadStatNode curr)
 
     /* data_write */
     {
-        print_len += sprintf(print_buffer + print_len, "");
         for (int i = 0; i < print_depth; i++)
             print_len += sprintf(print_buffer + print_len, "    ");
         print_len += sprintf(print_buffer + print_len, " ├─ data_write: ");
@@ -495,7 +532,6 @@ static void bread_print_node(BreadStatNode curr)
 
     /* call_cnt */
     {
-        print_len += sprintf(print_buffer + print_len, "");
         for (int i = 0; i < print_depth; i++)
             print_len += sprintf(print_buffer + print_len, "    ");
         print_len += sprintf(print_buffer + print_len, " └─ call_cnt: %lu\n", curr->call_cnt);

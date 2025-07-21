@@ -11,14 +11,13 @@ int bread_init_hashtable()
     return 0;
 }
 
-int bread_hashtable_lookup(uint64_t func_fingerprint, int stack_depth)
+int bread_hashtable_lookup(uint64_t gene)
 {
-	int curr_idx = hashtable[(int)(func_fingerprint & HASH_ENTRY_MASK)];
+	int curr_idx = hashtable[(int)(gene & HASH_ENTRY_MASK)];
 	
 	while (curr_idx != -1) {
 		BreadStatNode curr = bread_nodes + curr_idx;
-		if (curr->func_fingerprint == func_fingerprint &&
-			curr->stack_depth == stack_depth)
+		if (curr->gene == gene)
 			return curr_idx;
 
 		curr_idx = curr->hash_next;
@@ -27,9 +26,9 @@ int bread_hashtable_lookup(uint64_t func_fingerprint, int stack_depth)
 	return -1;
 }
 
-int bread_hashtable_insert(uint64_t func_fingerprint, int node_idx)
+int bread_hashtable_insert(uint64_t gene, int node_idx)
 {
-	int *entry = hashtable + (int)(func_fingerprint & HASH_ENTRY_MASK); 
+	int *entry = hashtable + (int)(gene & HASH_ENTRY_MASK); 
 	bread_nodes[node_idx].hash_next = *entry;
 	*entry = node_idx;
 
