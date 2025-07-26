@@ -227,7 +227,7 @@ int main(int argc, char *argv[])
              (start_2.tv_sec * 1000000000 + start_2.tv_nsec)));
 
 #ifdef BREAD
-    bread_end();
+    bread_end_w_comment("comment test");
     bread_finish();
 #endif /* BREAD */
 

@@ -275,9 +275,11 @@ int bread_start_internal(const char *func)
         node_idx = num_nodes++;
 
         curr = bread_nodes + node_idx;
+        curr->is_first_call = 1;
         curr->stack_depth = stack_depth;
         curr->gene_prev = gene_prev;
         curr->gene = gene;
+        curr->comment[0] = '\0';
         curr->func_fingerprint = func_fingerprint;
         sprintf(curr->func_name, func);
 
@@ -309,7 +311,7 @@ int bread_start_internal(const char *func)
     return 0;
 }
 
-int bread_end()
+int bread_end_internal(char *comment)
 {
     BreadStatNode curr;
 
@@ -317,6 +319,11 @@ int bread_end()
         return 1;
 
     curr = bread_nodes + most_recent_node_idx;
+
+    if (unlikely(curr->is_first_call)) {
+        curr->is_first_call = 0;
+        sprintf(curr->comment, comment);
+    }
     
     /* During recursion */
     if (--(curr->recursion_cnt) > 0)
@@ -345,8 +352,8 @@ static void bread_print_node(BreadStatNode curr)
     for (int i = 0; i < print_depth; i++)
         print_len += sprintf(print_buffer + print_len, "    ");
 
-    print_len += sprintf(print_buffer + print_len, "[%s]\n",
-            curr->func_name);
+    print_len += sprintf(print_buffer + print_len, "[%s], comment: %s\n",
+            curr->func_name, curr->comment);
 
     /* latency */
     {

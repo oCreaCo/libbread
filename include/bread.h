@@ -33,6 +33,7 @@
 typedef struct BreadStatNodeData
 {
 	/* metadata */
+	int is_first_call;
 	int hash_next; // node_idx
 	int stack_depth;
 	int num_children;
@@ -41,6 +42,7 @@ typedef struct BreadStatNodeData
 	uint64_t gene_prev;
 	uint64_t gene;
 	uint64_t func_fingerprint;
+	char comment[64];
 	char func_name[256];
 
 	/* etc. */
