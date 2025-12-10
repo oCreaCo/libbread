@@ -1,7 +1,7 @@
 CC=gcc
 CFLAGS= -Wall -Wextra -O2
-CPPFLAGS=-I./include -D_GNU_SOURCE -DNDEBUG -DBREAD_IO -DBREAD_MEM -DOUTSTREAM=stderr
-LDFLAGS=-shared
+CPPFLAGS=-I./include -D_GNU_SOURCE -DNDEBUG -DBREAD_IO -DBREAD_MEM -DOUTSTREAM=stderr -DPRINT -DFLAME_GRAPH
+LDFLAGS=-shared -lpthread
 TARGET_BIN=test
 
 SRC_DIR=src
@@ -34,7 +34,7 @@ $(TARGET_BIN): test.o
 # Compile test.c
 test.o:
 	sudo cp include/libbread.h /usr/include
-	$(CC) $(CFLAGS) $(CPPFLAGS) -c test.c -DBREAD -L. -lbread
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c test.c -DBREAD -lbread
 
 # Clean build files
 clean:

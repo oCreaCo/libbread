@@ -15,6 +15,8 @@
 extern "C" {
 #endif /* __cplusplus */
 
+extern void bread_set_output_directory(char *dir);
+
 extern int bread_init_internal(int is_main, uint64_t token);
 extern int bread_start_internal(const char *func);
 extern int bread_end_internal(char *comment);

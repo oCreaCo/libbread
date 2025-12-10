@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/types.h>
+#include <pthread.h>
 
 #include "bread.h"
 #include "bread_hashtable.h"
@@ -27,8 +28,28 @@ thread_local int most_recent_node_idx;
 thread_local int stack_depth;
 thread_local int print_depth;
 
-thread_local char print_buffer[1 << 16];
+thread_local char output_directory[128] = { 0 };
+
+#ifdef PRINT
+thread_local char print_buffer[1 << 10];
 thread_local int print_len;
+
+pthread_spinlock_t print_spin_lock;
+#endif /* PRINT */
+
+#ifdef FLAME_GRAPH
+FILE *output_latency;
+#ifdef BREAD_MEM
+FILE *output_mem_alloced;
+FILE *output_mem_freed;
+#endif /* BREAD_MEM */
+#ifdef BREAD_IO
+FILE *output_io_read_latency;
+FILE *output_io_write_latency;
+FILE *output_io_read_amount;
+FILE *output_io_write_amount;
+#endif /* BREAD_IO */
+#endif /* FMALE_GRAPH */
 
 #ifdef BREAD_MEM
 thread_local int64_t mem_curr;
@@ -39,8 +60,8 @@ void (*real_free)(void*) = NULL;
 #endif /* BREAD_MEM */
 
 #ifdef BREAD_IO
-thread_local ssize_t data_read;
-thread_local ssize_t data_write;
+thread_local ssize_t io_read_amount;
+thread_local ssize_t io_write_amount;
 
 ssize_t (*real_pread)(int, void*, size_t, off_t) = NULL;
 ssize_t (*real_pwrite)(int, const void*, size_t, off_t) = NULL;
@@ -121,11 +142,11 @@ ssize_t pread(int fd, void *buf, size_t count, off_t offset)
         size = real_pread(fd, buf, count, offset);
         clock_gettime(CLOCK_MONOTONIC, &(end));
 
-        curr->data_read += size;
+        curr->io_read_amount += size;
         curr->io_read_latency +=
             ((end.tv_sec * G + end.tv_nsec) -
              (start.tv_sec * G + start.tv_nsec));
-        data_read += size;
+        io_read_amount += size;
     } else {
         size = real_pread(fd, buf, count, offset);
     }
@@ -154,11 +175,11 @@ ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset)
         size = real_pwrite(fd, buf, count, offset);
         clock_gettime(CLOCK_MONOTONIC, &(end));
 
-        curr->data_write += size;
+        curr->io_write_amount += size;
         curr->io_write_latency +=
             ((end.tv_sec * G + end.tv_nsec) -
              (start.tv_sec * G + start.tv_nsec));
-        data_write += size;
+        io_write_amount += size;
     } else {
         size = real_pwrite(fd, buf, count, offset);
     }
@@ -167,10 +188,20 @@ ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset)
 }
 #endif /* BREAD_IO */
 
+void bread_set_output_directory(char *dir)
+{
+    sprintf(output_directory, dir);
+}
+
 int bread_init_internal(int is_main, uint64_t token)
 {
     if (unlikely(flag == 0))
         return 1;
+
+#ifdef PRINT
+    if (unlikely(is_main && pthread_spin_init(&print_spin_lock, PTHREAD_PROCESS_PRIVATE) != 0))
+        return 1;
+#endif /* PRINT */
 
     if (unlikely(bread_init_hashtable()))
         return 1;
@@ -194,8 +225,8 @@ int bread_init_internal(int is_main, uint64_t token)
 #endif /* BREAD_MEM */
 
 #ifdef BREAD_IO
-    data_read = 0;
-    data_write = 0;
+    io_read_amount = 0;
+    io_write_amount = 0;
 #endif /* BREAD_IO */
 
     for (int i = 0; i < MAX_NUM_NODES; i++) {
@@ -218,8 +249,8 @@ int bread_init_internal(int is_main, uint64_t token)
 #endif /* BREAD_MEM */
 
 #ifdef BREAD_IO
-        bread_nodes[i].data_read = 0;
-        bread_nodes[i].data_write = 0;
+        bread_nodes[i].io_read_amount = 0;
+        bread_nodes[i].io_write_amount = 0;
 #endif /* BREAD_IO */
 
         stack[i] = -1;
@@ -322,7 +353,9 @@ int bread_end_internal(char *comment)
 
     if (unlikely(curr->is_first_call)) {
         curr->is_first_call = 0;
-        sprintf(curr->comment, comment);
+
+        if (comment)
+            sprintf(curr->comment, comment);
     }
     
     /* During recursion */
@@ -345,18 +378,26 @@ int bread_end_internal(char *comment)
     return 0;
 }
 
-static void bread_print_node(BreadStatNode curr)
+static void bread_print_node(BreadStatNode curr, const char *func_history)
 {
     uint64_t tmp1, tmp2;
+    char func_stack[256];
 
+#ifdef PRINT
     for (int i = 0; i < print_depth; i++)
         print_len += sprintf(print_buffer + print_len, "    ");
 
     print_len += sprintf(print_buffer + print_len, "[%s], comment: %s\n",
             curr->func_name, curr->comment);
+#endif /* PRINT */
+
+#ifdef FLAME_GRAPH
+    sprintf(func_stack, "%s%s;", func_history, curr->func_name);
+#endif /* FLAME_GRAPH */
 
     /* latency */
     {
+#ifdef PRINT
         for (int i = 0; i < print_depth; i++)
             print_len += sprintf(print_buffer + print_len, "    ");
         print_len += sprintf(print_buffer + print_len, "<latency: ");
@@ -379,63 +420,17 @@ static void bread_print_node(BreadStatNode curr)
 
         print_len += sprintf(print_buffer + print_len, "%lu ns, depth: %d>\n",
                              tmp1, curr->stack_depth);
+#endif /* PRINT */
+
+#ifdef FLAME_GRAPH
+        fprintf(output_latency, "%s %lu\n", func_stack, curr->latency);
+#endif /* FLAME_GRAPH */
     }
-
-#ifdef BREAD_IO
-    /* io_read_latency */
-    {
-        for (int i = 0; i < print_depth; i++)
-            print_len += sprintf(print_buffer + print_len, "    ");
-        print_len += sprintf(print_buffer + print_len, " ├─ io_read_latency: ");
-        tmp1 = curr->io_read_latency;
-
-        tmp2 = tmp1 / G;
-        if (tmp2 > 0)
-            print_len += sprintf(print_buffer + print_len, "%lu s ", tmp2);
-        tmp1 %= G;
-
-        tmp2 = tmp1 / M;
-        if (tmp2 > 0)
-            print_len += sprintf(print_buffer + print_len, "%lu ms ", tmp2);
-        tmp1 %= M;
-
-        tmp2 = tmp1 / K;
-        if (tmp2 > 0)
-            print_len += sprintf(print_buffer + print_len, "%lu us ", tmp2);
-        tmp1 %= K;
-
-        print_len += sprintf(print_buffer + print_len, "%lu ns\n", tmp1);
-    }
-
-    /* io_write_latency */
-    {
-        for (int i = 0; i < print_depth; i++)
-            print_len += sprintf(print_buffer + print_len, "    ");
-        print_len += sprintf(print_buffer + print_len, " ├─ io_write_latency: ");
-        tmp1 = curr->io_write_latency;
-
-        tmp2 = tmp1 / G;
-        if (tmp2 > 0)
-            print_len += sprintf(print_buffer + print_len, "%lu s ", tmp2);
-        tmp1 %= G;
-
-        tmp2 = tmp1 / M;
-        if (tmp2 > 0)
-            print_len += sprintf(print_buffer + print_len, "%lu ms ", tmp2);
-        tmp1 %= M;
-
-        tmp2 = tmp1 / K;
-        if (tmp2 > 0)
-            print_len += sprintf(print_buffer + print_len, "%lu us ", tmp2);
-        tmp1 %= K;
-
-        print_len += sprintf(print_buffer + print_len, "%lu ns\n", tmp1);
-    }
-#endif /* BREAD_IO */
 
 #ifdef BREAD_MEM
     /* mem_alloced */
     {
+#ifdef PRINT
         for (int i = 0; i < print_depth; i++)
             print_len += sprintf(print_buffer + print_len, "    ");
         print_len += sprintf(print_buffer + print_len, " ├─ mem_alloced: ");
@@ -457,10 +452,16 @@ static void bread_print_node(BreadStatNode curr)
         tmp1 %= KB;
 
         print_len += sprintf(print_buffer + print_len, "%lu B\n", tmp1);
+#endif /* PRINT */
+
+#ifdef FLAME_GRAPH
+        fprintf(output_mem_alloced, "%s %lu\n", func_stack, curr->mem_alloced);
+#endif /* FLAME_GRAPH */
     }
 
     /* mem_freed */
     {
+#ifdef PRINT
         for (int i = 0; i < print_depth; i++)
             print_len += sprintf(print_buffer + print_len, "    ");
         print_len += sprintf(print_buffer + print_len, " ├─ mem_freed: ");
@@ -482,41 +483,84 @@ static void bread_print_node(BreadStatNode curr)
         tmp1 %= KB;
 
         print_len += sprintf(print_buffer + print_len, "%lu B\n", tmp1);
+#endif /* PRINT */
+
+#ifdef FLAME_GRAPH
+        fprintf(output_mem_freed, "%s %lu\n", func_stack, curr->mem_freed);
+#endif /* FLAME_GRAPH */
     }
 #endif /* BREAD_MEM */
 
 #ifdef BREAD_IO
-    /* data_read */
+    /* io_read_latency */
     {
+#ifdef PRINT
         for (int i = 0; i < print_depth; i++)
             print_len += sprintf(print_buffer + print_len, "    ");
-        print_len += sprintf(print_buffer + print_len, " ├─ data_read: ");
-        tmp1 = curr->data_read;
+        print_len += sprintf(print_buffer + print_len, " ├─ io_read_latency: ");
+        tmp1 = curr->io_read_latency;
 
-        tmp2 = tmp1 / GB;
+        tmp2 = tmp1 / G;
         if (tmp2 > 0)
-            print_len += sprintf(print_buffer + print_len, "%lu G ", tmp2);
-        tmp1 %= GB;
+            print_len += sprintf(print_buffer + print_len, "%lu s ", tmp2);
+        tmp1 %= G;
 
-        tmp2 = tmp1 / MB;
+        tmp2 = tmp1 / M;
         if (tmp2 > 0)
-            print_len += sprintf(print_buffer + print_len, "%lu M ", tmp2);
-        tmp1 %= MB;
+            print_len += sprintf(print_buffer + print_len, "%lu ms ", tmp2);
+        tmp1 %= M;
 
-        tmp2 = tmp1 / KB;
+        tmp2 = tmp1 / K;
         if (tmp2 > 0)
-            print_len += sprintf(print_buffer + print_len, "%lu K ", tmp2);
-        tmp1 %= KB;
+            print_len += sprintf(print_buffer + print_len, "%lu us ", tmp2);
+        tmp1 %= K;
 
-        print_len += sprintf(print_buffer + print_len, "%lu B\n", tmp1);
+        print_len += sprintf(print_buffer + print_len, "%lu ns\n", tmp1);
+#endif /* PRINT */
+
+#ifdef FLAME_GRAPH
+        fprintf(output_io_read_latency, "%s %lu\n", func_stack, curr->io_read_latency);
+#endif /* FLAME_GRAPH */
     }
 
-    /* data_write */
+    /* io_write_latency */
     {
+#ifdef PRINT
         for (int i = 0; i < print_depth; i++)
             print_len += sprintf(print_buffer + print_len, "    ");
-        print_len += sprintf(print_buffer + print_len, " ├─ data_write: ");
-        tmp1 = curr->data_write;
+        print_len += sprintf(print_buffer + print_len, " ├─ io_write_latency: ");
+        tmp1 = curr->io_write_latency;
+
+        tmp2 = tmp1 / G;
+        if (tmp2 > 0)
+            print_len += sprintf(print_buffer + print_len, "%lu s ", tmp2);
+        tmp1 %= G;
+
+        tmp2 = tmp1 / M;
+        if (tmp2 > 0)
+            print_len += sprintf(print_buffer + print_len, "%lu ms ", tmp2);
+        tmp1 %= M;
+
+        tmp2 = tmp1 / K;
+        if (tmp2 > 0)
+            print_len += sprintf(print_buffer + print_len, "%lu us ", tmp2);
+        tmp1 %= K;
+
+        print_len += sprintf(print_buffer + print_len, "%lu ns\n", tmp1);
+#endif /* PRINT */
+
+#ifdef FLAME_GRAPH
+        fprintf(output_io_write_latency, "%s %lu\n", func_stack, curr->io_write_latency);
+#endif /* FLAME_GRAPH */
+    }
+
+    /* io_read_amount */
+    {
+#ifdef PRINT
+        for (int i = 0; i < print_depth; i++)
+            print_len += sprintf(print_buffer + print_len, "    ");
+        print_len += sprintf(print_buffer + print_len, " ├─ io_read_amount: ");
+        tmp1 = curr->io_read_amount;
 
         tmp2 = tmp1 / GB;
         if (tmp2 > 0)
@@ -534,9 +578,46 @@ static void bread_print_node(BreadStatNode curr)
         tmp1 %= KB;
 
         print_len += sprintf(print_buffer + print_len, "%lu B\n", tmp1);
+#endif /* PRINT */
+
+#ifdef FLAME_GRAPH
+        fprintf(output_io_read_amount, "%s %lu\n", func_stack, curr->io_read_amount);
+#endif /* FLAME_GRAPH */
+    }
+
+    /* io_write_amount */
+    {
+#ifdef PRINT
+        for (int i = 0; i < print_depth; i++)
+            print_len += sprintf(print_buffer + print_len, "    ");
+        print_len += sprintf(print_buffer + print_len, " ├─ io_write_amount: ");
+        tmp1 = curr->io_write_amount;
+
+        tmp2 = tmp1 / GB;
+        if (tmp2 > 0)
+            print_len += sprintf(print_buffer + print_len, "%lu G ", tmp2);
+        tmp1 %= GB;
+
+        tmp2 = tmp1 / MB;
+        if (tmp2 > 0)
+            print_len += sprintf(print_buffer + print_len, "%lu M ", tmp2);
+        tmp1 %= MB;
+
+        tmp2 = tmp1 / KB;
+        if (tmp2 > 0)
+            print_len += sprintf(print_buffer + print_len, "%lu K ", tmp2);
+        tmp1 %= KB;
+
+        print_len += sprintf(print_buffer + print_len, "%lu B\n", tmp1);
+#endif /* PRINT */
+
+#ifdef FLAME_GRAPH
+        fprintf(output_io_write_amount, "%s %lu\n", func_stack, curr->io_write_amount);
+#endif /* FLAME_GRAPH */
     }
 #endif /* BREAD_IO */
 
+#ifdef PRINT
     /* call_cnt */
     {
         for (int i = 0; i < print_depth; i++)
@@ -544,9 +625,13 @@ static void bread_print_node(BreadStatNode curr)
         print_len += sprintf(print_buffer + print_len, " └─ call_cnt: %lu\n", curr->call_cnt);
     }
 
+    fprintf(OUTSTREAM, print_buffer);
+    print_len = 0;
+#endif /* PRINT */
+
     for (int i = 0; i < curr->num_children; i++) {
         ++print_depth;
-        bread_print_node(bread_nodes + curr->children[i]);
+        bread_print_node(bread_nodes + curr->children[i], func_stack);
         --print_depth;
     }
 }
@@ -559,19 +644,16 @@ static void bread_add_child_stat(BreadStatNode curr)
         child = bread_nodes + curr->children[i];
         bread_add_child_stat(child);
 
-#ifdef BREAD_IO
-        curr->io_read_latency += child->io_read_latency;
-        curr->io_write_latency += child->io_write_latency;
-#endif /* BREAD_IO */
-
 #ifdef BREAD_MEM
         curr->mem_alloced += child->mem_alloced;
         curr->mem_freed += child->mem_freed;
 #endif /* BREAD_MEM */
 
 #ifdef BREAD_IO
-        curr->data_read += child->data_read;
-        curr->data_write += child->data_write;
+        curr->io_read_latency += child->io_read_latency;
+        curr->io_write_latency += child->io_write_latency;
+        curr->io_read_amount += child->io_read_amount;
+        curr->io_write_amount += child->io_write_amount;
 #endif /* BREAD_IO */
     }
 }
@@ -580,7 +662,6 @@ int bread_finish()
 {
     uint64_t tmp1, tmp2;
     char file_name[128];
-    FILE *output_file;
 
     if (unlikely(flag == 0))
         return 1;
@@ -588,6 +669,31 @@ int bread_finish()
     if (unlikely(bread_nodes[0].stack_depth == -1)) // no measurement
         return 0;
 
+#ifdef FLAME_GRAPH
+    if (output_directory[0] == 0)
+        sprintf(output_directory, "%s/libbread_results", getenv("HOME"));
+
+    sprintf(file_name, "%s/%d_%ld_latency.txt", output_directory, tid, t_token);
+    output_latency = fopen(file_name, "a+");
+#ifdef BREAD_MEM
+    sprintf(file_name, "%s/%d_%ld_mem_alloced.txt", output_directory, tid, t_token);
+    output_mem_alloced = fopen(file_name, "a+");
+    sprintf(file_name, "%s/%d_%ld_mem_freed.txt", output_directory, tid, t_token);
+    output_mem_freed = fopen(file_name, "a+");
+#endif /* BREAD_MEM */
+#ifdef BREAD_IO
+    sprintf(file_name, "%s/%d_%ld_io_read_latency.txt", output_directory, tid, t_token);
+    output_io_read_latency = fopen(file_name, "a+");
+    sprintf(file_name, "%s/%d_%ld_io_write_latency.txt", output_directory, tid, t_token);
+    output_io_write_latency = fopen(file_name, "a+");
+    sprintf(file_name, "%s/%d_%ld_io_read_amount.txt", output_directory, tid, t_token);
+    output_io_read_amount = fopen(file_name, "a+");
+    sprintf(file_name, "%s/%d_%ld_io_write_amount.txt", output_directory, tid, t_token);
+    output_io_write_amount = fopen(file_name, "a+");
+#endif /* BREAD_IO */
+#endif /* FLAME_GRAPH */
+
+#ifdef PRINT
     print_len = 0;
     print_len += sprintf(print_buffer + print_len, "bread_finish, tid: %d, type: %s",
                          tid, t_type == 1 ? "main" : "worker");
@@ -618,10 +724,10 @@ int bread_finish()
 #endif /* BREAD_MEM */
 
 #ifdef BREAD_IO
-    /* data_read */
+    /* io_read_amount */
     {
-        print_len += sprintf(print_buffer + print_len, ", data_read: ");
-        tmp1 = data_read;
+        print_len += sprintf(print_buffer + print_len, ", io_read_amount: ");
+        tmp1 = io_read_amount;
 
         tmp2 = tmp1 / GB;
         if (tmp2 > 0)
@@ -641,10 +747,10 @@ int bread_finish()
         print_len += sprintf(print_buffer + print_len, "%lu B", tmp1);
     }
 
-    /* data_write */
+    /* io_write_amount */
     {
-        print_len += sprintf(print_buffer + print_len, ", data_write: ");
-        tmp1 = data_write;
+        print_len += sprintf(print_buffer + print_len, ", io_write_amount: ");
+        tmp1 = io_write_amount;
 
         tmp2 = tmp1 / GB;
         if (tmp2 > 0)
@@ -664,24 +770,38 @@ int bread_finish()
         print_len += sprintf(print_buffer + print_len, "%lu B", tmp1);
     }
 #endif /* BREAD_IO */
+
     if (t_token != 0)
         print_len += sprintf(print_buffer + print_len, ", token: %lu", t_token);
     print_len += sprintf(print_buffer + print_len, "\n");
+#endif /* PRINT */
 
     // DFS
     bread_add_child_stat(bread_nodes);
 
     // DFS
     print_depth = 0;
-    bread_print_node(bread_nodes);
+#ifdef PRINT
+    pthread_spin_lock(&print_spin_lock);
+#endif /* PRINT */
+    bread_print_node(bread_nodes, "");
+#ifdef PRINT
+    pthread_spin_unlock(&print_spin_lock);
+#endif /* PRINT */
 
-#if 0 /* TODO */
-    sprintf(file_name, "%s/libbread_results/%d.%ld.txt", getenv("HOME"), tid, t_token);
-    output_file = fopen(file_name, "a+");
-    fprintf(output_file, print_buffer);
-    fclose(output_file);
-#endif
-    fprintf(OUTSTREAM, print_buffer);
+#ifdef FLAME_GRAPH
+    fclose(output_latency);
+#ifdef BREAD_MEM
+    fclose(output_mem_alloced);
+    fclose(output_mem_freed);
+#endif /* BREAD_MEM */
+#ifdef BREAD_IO
+    fclose(output_io_read_latency);
+    fclose(output_io_write_latency);
+    fclose(output_io_read_amount);
+    fclose(output_io_write_amount);
+#endif /* BREAD_IO */
+#endif /* FLAME_GRAPH */
 
     return 0;
 }

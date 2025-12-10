@@ -151,6 +151,7 @@ int main(int argc, char *argv[])
 
 #ifdef BREAD
     bread_flag_on();
+    bread_set_output_directory(".");
     bread_init();
     bread_start();
 #endif /* BREAD */

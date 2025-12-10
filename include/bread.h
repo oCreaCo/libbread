@@ -50,10 +50,6 @@ typedef struct BreadStatNodeData
 
 	/* latency stat */
 	uint64_t latency;
-#ifdef BREAD_IO
-	uint64_t io_read_latency;
-	uint64_t io_write_latency;
-#endif /* BREAD_IO */
 
 #ifdef BREAD_MEM
 	/* memory stat */
@@ -63,8 +59,10 @@ typedef struct BreadStatNodeData
 
 #ifdef BREAD_IO
 	/* I/O stat */
-	ssize_t data_read;
-	ssize_t data_write;
+	uint64_t io_read_latency;
+	uint64_t io_write_latency;
+	ssize_t io_read_amount;
+	ssize_t io_write_amount;
 #endif /* BREAD_IO */
 
 	/* Timestamp */
