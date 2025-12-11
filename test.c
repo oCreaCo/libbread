@@ -89,14 +89,10 @@ void D()
 void C()
 {
 #ifdef BREAD
-    bread_start();
+    bread_trace_w_comment("this is C");
 #endif /* BREAD */
 
     fprintf(stderr, "C\n");
-
-#ifdef BREAD
-    bread_end();
-#endif /* BREAD */
 }
 
 void B()
