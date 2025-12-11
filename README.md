@@ -196,3 +196,16 @@ bread_set_output_directory("/path/to/output");
 ```
 
 All flamegraph-formatted files will be generated in this directory.
+
+---
+
+### Build and Link libbread.so
+
+```sh
+# In the libbread directory
+make purge
+make
+
+# Link libbread.so during target code compilation
+gcc -o target target.c -lbread
+```
