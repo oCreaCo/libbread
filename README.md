@@ -55,6 +55,28 @@ To generate output files compatible with the FlameGraph toolset, add `-DFLAME_GR
 
 See **`test.c`** for a complete usage example.
 
+---
+
+### APIs
+
+```c
+#include <libbread.h>
+
+bread_flag_on();
+bread_flag_off();
+
+bread_start();
+bread_end();
+bread_trace();
+
+bread_init();
+bread_finish();
+```
+
+Include `libbread.h` in the file where libbread's APIs are called.
+
+---
+
 ### Enable / Disable Measurement
 
 ```c
@@ -71,6 +93,8 @@ int main(void)
 ```
 
 Metrics are collected **only when the flag is ON**.
+
+---
 
 ### Measure Function Execution
 
